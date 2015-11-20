@@ -2,6 +2,7 @@
 using Newtonsoft.Json;
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 
 namespace ApiPort2Json
@@ -18,6 +19,9 @@ Usage: apiport2json url output
   url: the URL of the ApiPort repository. Default is ""https://github.com/Microsoft/dotnet-apiport/"".
   output: the path of the JSON output file. Default is ""apiport.json"".");
             }
+
+            //var commentExpression = new Regex(@"<!--.*?-->", RegexOptions.Singleline);
+
             /* Template:
 
             ## ID: Breaking Change Title
@@ -38,6 +42,7 @@ Usage: apiport2json url output
             Description goes here.
 
             - [ ] Quirked
+            - [ ] Optional
             - [ ] Build-time break
 
             ### Recommended Action
@@ -58,7 +63,24 @@ Usage: apiport2json url output
                 Source analyzer status: Not usefully detectable with an analyzer
             -->
             */
-            var parseExpression = new Regex(@"## (?<id>\d+): (?<title>[^\r\n]+)[\r\n\s]+### Scope[\r\n\s]+(?<scope>[^\r\n]+)", RegexOptions.ExplicitCapture | RegexOptions.Multiline);
+            var parseExpression = new Regex(@"^[\r\n\s]*"
+                + @"## (?<id>\d+): (?<title>[^\r\n]+)[\r\n\s]+"
+                + @"### Scope[\r\n\s]+(?<scope>[^\r\n]+)[\r\n\s]+"
+                + @"### Version Introduced[\r\n\s]+(?<versionIntroduced>[^\r\n]+)[\r\n\s]+"
+                + @"(### Version Reverted[\r\n\s]+(?<versionReverted>[^\r\n]+)[\r\n\s]+)?"
+                + @"### Source Analyzer Status[\r\n\s]+(?<sourceAnalyzerStatus>[^\r\n]+)[\r\n\s]+"
+                + @"### Change Description[\r\n\s]+(?<description>.+)[\r\n\s]*"
+                + @"- \[(?<quirked>.)\] Quirked[\r\n\s]+"
+                + @"(- \[(?<optional>.)\] Optional[\r\n\s]+)?"
+                + @"- \[(?<buildTimeBreak>.)\] Build-time break[\r\n\s]+"
+                + @"### Recommended Action[\r\n\s]+(?<recommendedAction>.+)[\r\n\s]*"
+                + @"### Affected APIs[\r\n\s]+(?<affectedApis>.+)[\r\n\s]*"
+                + @"### (Category|Categories)[\r\n\s]+(?<category>.+?)[\r\n\s]*"
+                + @"([\r\n\s]+\[More information\]\((?<moreInformation>.+)\)[\r\n\s]*)?"
+                + @"([\r\n\s]+<!--"
+                + @"[\r\n\s]+\s\s\s\s### Notes[\r\n\s]+(?<notes>.+)[\r\n\s]*"
+                + @"[\r\n\s]+-->)?[\r\n\s]*$",
+                RegexOptions.ExplicitCapture | RegexOptions.Singleline);
 
             var apiPortRepoUrl = args.Length > 0 ? args[0] : "https://github.com/Microsoft/dotnet-apiport/";
             var outputPath = args.Length > 1 ? args[1] : "apiport.json";
@@ -75,6 +97,7 @@ Usage: apiport2json url output
                 using (var output = File.CreateText(outputPath)) {
                     using (var w = new JsonTextWriter(output))
                     {
+                        w.Formatting = Formatting.Indented;
                         w.WriteStartArray();
                         // scan /docs/BreakingChanges/*.md
                         var docFolder = Path.Combine(repoFolder, "docs", "BreakingChanges");
@@ -89,20 +112,55 @@ Usage: apiport2json url output
                             w.WriteStartObject();
 
                             var markdown = File.ReadAllText(markdownFilePath);
+                            // Remove comments
+                            // markdown = commentExpression.Replace(markdown, "");
+
                             var match = parseExpression.Match(markdown);
 
+                            Action<string> add = name => {
+                                var value = match.Groups[name].Value.Trim();
+                                if (!string.IsNullOrWhiteSpace(value))
+                                {
+                                    w.WritePropertyName(name);
+                                    w.WriteValue(value);
+                                }
+                            };
 
-                            var id = int.Parse(match.Groups["id"].Value);
+                            Action<string> addFlag = name => {
+                                w.WritePropertyName(name);
+                                w.WriteValue(string.IsNullOrWhiteSpace(match.Groups[name].Value) ? false : true);
+                            };
+
                             w.WritePropertyName("id");
-                            w.WriteValue(id);
-
-                            var title = match.Groups["title"].Value;
-                            w.WritePropertyName("title");
-                            w.WriteValue(title);
-
-                            var scope = match.Groups["scope"].Value;
-                            w.WritePropertyName("scope");
-                            w.WriteValue(scope);
+                            w.WriteValue(int.Parse(match.Groups["id"].Value));
+                            add("title");
+                            add("scope");
+                            add("versionIntroduced");
+                            add("versionReverted");
+                            add("sourceAnalyzerStatus");
+                            add("description");
+                            addFlag("quirked");
+                            addFlag("optional");
+                            addFlag("buildTimeBreak");
+                            add("recommendedAction");
+                            add("affectedApis"); // Make that better-structured
+                            w.WritePropertyName("categories");
+                            w.WriteStartArray();
+                            var category = match.Groups["category"].Value;
+                            if (!string.IsNullOrWhiteSpace(category))
+                            {
+                                var categories = category
+                                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                                    .Select(s => s.Trim());
+                                foreach(var categoryName in categories)
+                                {
+                                    w.WriteValue(categoryName);
+                                }
+                            }
+                            w.WriteEndArray();
+                            add("moreInformation");
+                            add("originalBug");
+                            add("notes");
 
                             w.WriteEndObject();
                         }
@@ -112,7 +170,10 @@ Usage: apiport2json url output
             }
             finally
             {
-                Directory.Delete(repoFolder, true);
+                try {
+                    Directory.Delete(repoFolder, true);
+                }
+                catch(UnauthorizedAccessException) { }
             }
         }
     }
